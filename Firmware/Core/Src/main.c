@@ -14,7 +14,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
-#include "stdarg.h"
+#include <stdarg.h>
 
 /* ==== Peripherals handles (generados por CubeMX normalmente) ==== */
 I2C_HandleTypeDef hi2c2;
@@ -45,11 +45,29 @@ UART_HandleTypeDef huart1;
 #define HTS221_T1_OUT_L        0x3E
 #define HTS221_T1_OUT_H        0x3F
 
+// --- LPS22HB (Pressure) I2C ---
+// Dirección 7-bit = 0x5C -> para HAL se pasa 8-bit (<<1)
+#define LPS22HB_ADDR        (0x5C << 1)
+#define LPS22HB_WHO_AM_I    0x0F
+#define LPS22HB_WHOAMI_VAL  0xB1
+#define LPS22HB_CTRL_REG1   0x10
+#define LPS22HB_CTRL_REG2   0x11
+#define LPS22HB_PRESS_OUT_XL 0x28
+
+// CTRL_REG1: ODR=1 Hz (001<<4 = 0x10), BDU=1 (0x02) => 0x12
+#define LPS22HB_CTRL1_CFG   0x12
+// CTRL_REG2: IF_ADD_INC=1 (bit4) => 0x10 (auto-increment en lecturas)
+#define LPS22HB_CTRL2_CFG   0x10
+
 /* ==== Prototipos mínimos ==== */
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_I2C2_Init(void);
+
+static HAL_StatusTypeDef LPS22HB_Init(I2C_HandleTypeDef *hi2c);
+static HAL_StatusTypeDef LPS22HB_ReadPressure_hPa(I2C_HandleTypeDef *hi2c, float *out_hPa);
+
 
 /* ==== Utils UART ==== */
 static void uprintln(const char *s) {
@@ -169,6 +187,50 @@ static HAL_StatusTypeDef HTS221_ReadTemp_C(float *tC, const HTS221_TCal *cal) {
   return HAL_OK;
 }
 
+static HAL_StatusTypeDef LPS22HB_Init(I2C_HandleTypeDef *hi2c)
+{
+  uint8_t who = 0;
+  if (HAL_I2C_Mem_Read(hi2c, LPS22HB_ADDR, LPS22HB_WHO_AM_I, I2C_MEMADD_SIZE_8BIT,
+                       &who, 1, 100) != HAL_OK) {
+    return HAL_ERROR;
+  }
+  if (who != LPS22HB_WHOAMI_VAL) {
+    return HAL_ERROR;
+  }
+
+  uint8_t v;
+  // CTRL_REG2: IF_ADD_INC=1 para autoincremento
+  v = LPS22HB_CTRL2_CFG;
+  if (HAL_I2C_Mem_Write(hi2c, LPS22HB_ADDR, LPS22HB_CTRL_REG2, I2C_MEMADD_SIZE_8BIT,
+                        &v, 1, 100) != HAL_OK) {
+    return HAL_ERROR;
+  }
+
+  // CTRL_REG1: ODR=1Hz, BDU=1
+  v = LPS22HB_CTRL1_CFG;
+  if (HAL_I2C_Mem_Write(hi2c, LPS22HB_ADDR, LPS22HB_CTRL_REG1, I2C_MEMADD_SIZE_8BIT,
+                        &v, 1, 100) != HAL_OK) {
+    return HAL_ERROR;
+  }
+
+  return HAL_OK;
+}
+
+static HAL_StatusTypeDef LPS22HB_ReadPressure_hPa(I2C_HandleTypeDef *hi2c, float *out_hPa)
+{
+  uint8_t buf[3];
+  if (HAL_I2C_Mem_Read(hi2c, LPS22HB_ADDR, LPS22HB_PRESS_OUT_XL, I2C_MEMADD_SIZE_8BIT,
+                       buf, 3, 100) != HAL_OK) {
+    return HAL_ERROR;
+  }
+  // 24-bit two's complement, 4096 LSB/hPa
+  int32_t raw = (int32_t)((((uint32_t)buf[2]) << 16) | (((uint32_t)buf[1]) << 8) | buf[0]);
+  if (raw & 0x00800000) { raw |= 0xFF000000; } // sign-extend
+  *out_hPa = ((float)raw) / 4096.0f;
+  return HAL_OK;
+}
+
+
 /* ==== MAIN ==== */
 int main(void)
 {
@@ -191,6 +253,12 @@ int main(void)
   } else {
     uprintln("HTS221 init OK");
   }
+  if (LPS22HB_Init(&hi2c2) == HAL_OK) {
+    uprintf("LPS22HB init OK\r\n");
+  } else {
+    uprintf("LPS22HB init FAIL\r\n");
+  }
+
 
   // Leer calibración
   HTS221_TCal cal = {0};
@@ -202,17 +270,25 @@ int main(void)
   }
 
   // Loop
+  // Loop
   while (1) {
-    float tC;
-    HAL_StatusTypeDef st = HTS221_ReadTemp_C(&tC, &cal);
-    if (st == HAL_OK) {
-      uprintf("Temp: %.2f C\r\n", tC);
-    } else {
-      uprintln("Temp read ERROR");
+    float tC = NAN;
+    float p_hPa = NAN;
+
+    // Lee temperatura usando nuestra función correcta (con calibración)
+    if (HTS221_ReadTemp_C(&tC, &cal) != HAL_OK) {
+      tC = NAN;
     }
 
-    HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
-    HAL_Delay(1000);
+    // Lee presión del LPS22HB
+    if (LPS22HB_ReadPressure_hPa(&hi2c2, &p_hPa) != HAL_OK) {
+      p_hPa = NAN;
+    }
+
+    // Imprime JSON por UART
+    uprintf("{\"temp_c\":%.2f,\"pres_hpa\":%.2f}\r\n", tC, p_hPa);
+
+    HAL_Delay(1000); // <- sin RTOS usamos HAL_Delay
   }
 }
 
@@ -298,6 +374,7 @@ void Error_Handler(void)
     HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
     HAL_Delay(100);
   }
+
 }
 
 
