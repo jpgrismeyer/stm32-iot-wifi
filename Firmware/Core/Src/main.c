@@ -271,27 +271,38 @@ int main(void)
 
   // Loop
   // Loop
-  while (1) {
-    float tC = NAN;
-    float p_hPa = NAN;
+  // Loop
+  while (1)
+  {
+      float tC = NAN;
+      float p_hPa = NAN;
 
-    // Lee temperatura usando nuestra función correcta (con calibración)
-    if (HTS221_ReadTemp_C(&tC, &cal) != HAL_OK) {
-      tC = NAN;
-    }
+      // Leer temperatura del HTS221
+      if (HTS221_ReadTemp_C(&tC, &cal) != HAL_OK) {
+          tC = NAN;
+      }
 
-    // Lee presión del LPS22HB
-    if (LPS22HB_ReadPressure_hPa(&hi2c2, &p_hPa) != HAL_OK) {
-      p_hPa = NAN;
-    }
+      // Leer presión del LPS22HB
+      if (LPS22HB_ReadPressure_hPa(&hi2c2, &p_hPa) != HAL_OK) {
+          p_hPa = NAN;
+      }
 
-    // Imprime JSON por UART
-    uprintf("{\"temp_c\":%.2f,\"pres_hpa\":%.2f}\r\n", tC, p_hPa);
+      // JSON robusto (usar null si falla)
+      if (isnanf(tC) && isnanf(p_hPa)) {
+          uprintf("{\"temp_c\":null,\"pres_hpa\":null}\r\n");
+      } else if (isnanf(tC)) {
+          uprintf("{\"temp_c\":null,\"pres_hpa\":%.2f}\r\n", p_hPa);
+      } else if (isnanf(p_hPa)) {
+          uprintf("{\"temp_c\":%.2f,\"pres_hpa\":null}\r\n", tC);
+      } else {
+          uprintf("{\"temp_c\":%.2f,\"pres_hpa\":%.2f}\r\n", tC, p_hPa);
+      }
 
-    HAL_Delay(1000); // <- sin RTOS usamos HAL_Delay
+      HAL_Delay(1000); // cada 1s
   }
-}
 
+  // <-- Cierra bien main() aquí
+  }
 /* ==== INITs generados por CubeMX — simplificados (ajusta si hace falta) ==== */
 void SystemClock_Config(void)
 {
